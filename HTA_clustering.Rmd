@@ -1,0 +1,636 @@
+---
+title: "HTA_clustering"
+author: "Lu Huang"
+date: "2026-02-27"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(recipes)
+library(scales)
+```
+
+
+```{r}
+health_data <- read.csv("/Users/evelynhuang/Desktop/STA497/dirty_v3_path.csv", header = TRUE)
+
+health_data <- na.omit(health_data)
+
+health_data <- health_data %>% select(-c(random_notes, noise_col))
+
+age_q <- quantile(health_data$Age, probs = 0.5, na.rm = TRUE, type = 7)
+bmi_q <- quantile(health_data$BMI, probs = 0.5, na.rm = TRUE, type = 7)
+
+health_data$age_bin <- ifelse(health_data$Age <= age_q, "Age_Low", "Age_High")
+health_data$bmi_bin <- ifelse(health_data$BMI <= bmi_q, "BMI_Low", "BMI_High")
+
+health_data$region_2x2 <- paste(health_data$age_bin, health_data$bmi_bin, sep = "__")
+
+health_data$region_2x2 <- factor(
+  health_data$region_2x2,
+  levels = c(
+    "Age_Low__BMI_Low",
+    "Age_Low__BMI_High",
+    "Age_High__BMI_Low",
+    "Age_High__BMI_High"
+  )
+)
+
+table(health_data$region_2x2, useNA = "ifany")
+age_q; bmi_q
+```
+
+
+```{r}
+## 1) select variables (exclude Age and BMI)
+X <- subset(health_data, select = -c(Age, BMI))
+
+## keep only numeric columns (PCA needs numeric)
+X_num <- X[, sapply(X, is.numeric), drop = FALSE]
+
+## 2) standardize (z-score)
+X_scaled <- scale(X_num, center = TRUE, scale = TRUE)
+
+## 3) PCA
+pca_fit <- prcomp(X_scaled, center = FALSE, scale. = FALSE)
+
+## 4) Scree plot (base R)
+eig <- pca_fit$sdev^2
+pve <- eig / sum(eig)
+
+plot(
+  pve,
+  type = "b",
+  xlab = "Principal Component",
+  ylab = "Proportion of Variance Explained",
+  main = "Scree Plot (PCA on standardized variables, excluding Age & BMI)"
+)
+
+## optional: cumulative PVE line
+lines(cumsum(pve), type = "b")
+legend(
+  "topright",
+  legend = c("PVE", "Cumulative PVE"),
+  lty = 1,
+  pch = 1,
+  bty = "n"
+)
+
+```
+
+
+```{r}
+# homogeneous dataset
+set.seed(123)
+n <- 5000
+
+health_homo <- health_data[rep(1, n), , drop = FALSE]
+
+# -----------------------
+# CATEGORICAL
+# -----------------------
+
+tab <- sort(table(health_data$Gender, useNA = "no"), decreasing = TRUE)
+lv  <- names(tab)
+
+p <- rep(0, length(lv))
+p[1] <- 0.8
+if (length(lv) >= 2) p[2] <- 0.1
+if (length(lv) > 2) p[3:length(lv)] <- 0  # keep any unexpected levels at 0 prob
+
+health_homo$Gender <- sample(lv, n, replace = TRUE, prob = p / sum(p))
+
+# Medical.Condition (3+ levels likely)
+tab <- sort(table(health_data$Medical.Condition, useNA = "no"), decreasing = TRUE)
+lv  <- names(tab)
+p   <- rep(0, length(lv))
+p[1] <- 0.85; p[2] <- 0.10
+if (length(lv) > 2) p[3:length(lv)] <- 0.05 / (length(lv) - 2)
+health_homo$Medical.Condition <- sample(lv, n, replace = TRUE, prob = p)
+
+# -----------------------
+# NUMERIC / INTEGER
+# -----------------------
+
+# Age
+mu <- mean(health_data$Age, na.rm = TRUE); s <- sd(health_data$Age, na.rm = TRUE)
+health_homo$Age <- rnorm(n, mu, 0.5 * s)
+
+# Glucose
+mu <- mean(health_data$Glucose, na.rm = TRUE); s <- sd(health_data$Glucose, na.rm = TRUE)
+health_homo$Glucose <- rnorm(n, mu, 0.5 * s)
+
+# Blood.Pressure
+mu <- mean(health_data$Blood.Pressure, na.rm = TRUE); s <- sd(health_data$Blood.Pressure, na.rm = TRUE)
+health_homo$Blood.Pressure <- rnorm(n, mu, 0.5 * s)
+
+# BMI
+mu <- mean(health_data$BMI, na.rm = TRUE); s <- sd(health_data$BMI, na.rm = TRUE)
+health_homo$BMI <- rnorm(n, mu, 0.5 * s)
+
+# Oxygen.Saturation
+mu <- mean(health_data$Oxygen.Saturation, na.rm = TRUE); s <- sd(health_data$Oxygen.Saturation, na.rm = TRUE)
+health_homo$Oxygen.Saturation <- rnorm(n, mu, 0.5 * s)
+
+# LengthOfStay (integer)
+mu <- mean(health_data$LengthOfStay, na.rm = TRUE); s <- sd(health_data$LengthOfStay, na.rm = TRUE)
+health_homo$LengthOfStay <- as.integer(round(rnorm(n, mu, 0.5 * s)))
+
+# Cholesterol
+mu <- mean(health_data$Cholesterol, na.rm = TRUE); s <- sd(health_data$Cholesterol, na.rm = TRUE)
+health_homo$Cholesterol <- rnorm(n, mu, 0.5 * s)
+
+# Triglycerides
+mu <- mean(health_data$Triglycerides, na.rm = TRUE); s <- sd(health_data$Triglycerides, na.rm = TRUE)
+health_homo$Triglycerides <- rnorm(n, mu, 0.5 * s)
+
+# HbA1c
+mu <- mean(health_data$HbA1c, na.rm = TRUE); s <- sd(health_data$HbA1c, na.rm = TRUE)
+health_homo$HbA1c <- rnorm(n, mu, 0.5 * s)
+
+# Smoking (binary 0/1)
+p1 <- mean(health_data$Smoking == 1, na.rm = TRUE)
+health_homo$Smoking <- rbinom(n, 1, prob = min(max(p1, 0.2), 0.8))
+
+# Alcohol (binary 0/1)
+p1 <- mean(health_data$Alcohol == 1, na.rm = TRUE)
+health_homo$Alcohol <- rbinom(n, 1, prob = min(max(p1, 0.2), 0.8))
+
+# Physical.Activity
+mu <- mean(health_data$Physical.Activity, na.rm = TRUE); s <- sd(health_data$Physical.Activity, na.rm = TRUE)
+health_homo$Physical.Activity <- rnorm(n, mu, 0.5 * s)
+
+# Diet.Score
+mu <- mean(health_data$Diet.Score, na.rm = TRUE); s <- sd(health_data$Diet.Score, na.rm = TRUE)
+health_homo$Diet.Score <- rnorm(n, mu, 0.5 * s)
+
+# Family.History (binary 0/1)
+p1 <- mean(health_data$Family.History == 1, na.rm = TRUE)
+health_homo$Family.History <- rbinom(n, 1, prob = min(max(p1, 0.2), 0.8))
+
+# Stress.Level
+mu <- mean(health_data$Stress.Level, na.rm = TRUE); s <- sd(health_data$Stress.Level, na.rm = TRUE)
+health_homo$Stress.Level <- rnorm(n, mu, 0.5 * s)
+
+# Sleep.Hours
+mu <- mean(health_data$Sleep.Hours, na.rm = TRUE); s <- sd(health_data$Sleep.Hours, na.rm = TRUE)
+health_homo$Sleep.Hours <- rnorm(n, mu, 0.5 * s)
+
+health_homo <- health_homo[, !(names(health_homo) %in% c("region", "trait")), drop = FALSE]
+```
+
+
+```{r}
+age_q <- quantile(health_homo$Age, probs = 0.5, na.rm = TRUE, type = 7)
+bmi_q <- quantile(health_homo$BMI, probs = 0.5, na.rm = TRUE, type = 7)
+
+health_homo$age_bin <- ifelse(health_homo$Age <= age_q, "Age_Low", "Age_High")
+health_homo$bmi_bin <- ifelse(health_homo$BMI <= bmi_q, "BMI_Low", "BMI_High")
+
+health_homo$region_2x2 <- paste(health_homo$age_bin, health_homo$bmi_bin, sep = "__")
+
+health_homo$region_2x2 <- factor(
+  health_homo$region_2x2,
+  levels = c(
+    "Age_Low__BMI_Low",
+    "Age_Low__BMI_High",
+    "Age_High__BMI_Low",
+    "Age_High__BMI_High"
+  )
+)
+
+table(health_homo$region_2x2, useNA = "ifany")
+age_q; bmi_q
+```
+
+
+```{r}
+## 1) select variables (exclude Age and BMI)
+X_homo <- subset(health_homo, select = -c(Age, BMI))
+
+## keep only numeric columns (PCA needs numeric)
+X_num_homo <- X_homo[, sapply(X_homo, is.numeric), drop = FALSE]
+
+## 2) standardize (z-score)
+X_scaled_homo <- scale(X_num_homo, center = TRUE, scale = TRUE)
+
+## 3) PCA
+pca_fit_homo <- prcomp(X_scaled_homo, center = FALSE, scale. = FALSE)
+
+## 4) Scree plot (base R)
+eig <- pca_fit_homo$sdev^2
+pve <- eig / sum(eig)
+
+plot(
+  pve,
+  type = "b",
+  xlab = "Principal Component",
+  ylab = "Proportion of Variance Explained",
+  main = "Scree Plot (PCA on standardized variables, excluding Age & BMI)"
+)
+
+## optional: cumulative PVE line
+lines(cumsum(pve), type = "b")
+legend(
+  "topright",
+  legend = c("PVE", "Cumulative PVE"),
+  lty = 1,
+  pch = 1,
+  bty = "n"
+)
+```
+
+
+
+# hta function
+
+```{r}
+compute_ht <- function(df, region_col = "region_2x2", trait_col = "trait") {
+
+  ok <- !is.na(df[[region_col]]) & !is.na(df[[trait_col]])
+  d <- df[ok, , drop = FALSE]
+
+  # --- FORCE atomic vectors (prevents list-column bugs) ---
+  to_atomic_chr <- function(x) {
+    if (is.list(x)) return(vapply(x, function(z) as.character(z)[1], character(1)))
+    as.character(x)
+  }
+  d[[region_col]] <- factor(to_atomic_chr(d[[region_col]]))
+  d[[trait_col]]  <- factor(to_atomic_chr(d[[trait_col]]))
+  # --------------------------------------------------------
+
+  trait_levels <- levels(d[[trait_col]])
+  if (is.null(trait_levels) || anyNA(trait_levels)) {
+    trait_levels <- sort(unique(d[[trait_col]]))
+  }
+  C <- length(trait_levels)
+  if (C <= 1) stop("Need >= 2 trait categories to compute HTI/HTA.")
+
+  hti_region <- function(x) {
+    tab <- table(factor(x, levels = trait_levels))
+    p <- as.numeric(tab) / sum(tab)
+    p <- p[p > 0]
+    -sum(p * log(p)) / log(C)
+  }
+
+  regions <- levels(d[[region_col]])
+  if (is.null(regions) || anyNA(regions)) regions <- sort(unique(d[[region_col]]))
+
+  n_by_region <- sapply(regions, function(r) sum(d[[region_col]] == r))
+  local_hti   <- sapply(regions, function(r) hti_region(d[[trait_col]][d[[region_col]] == r]))
+  weights     <- n_by_region / sum(n_by_region)
+  HTA         <- sum(weights * local_hti)
+
+  list(HTA = HTA, local_hti = local_hti, n_by_region = n_by_region, weights = weights)
+}
+```
+
+
+```{r}
+# 1) run one kmeans + HTA
+run_kmeans_ht <- function(df, scores, pcs_use, k,
+                          region_col = "region_2x2",
+                          nstart = 100, max_iter = 1000, seed = 1) {
+  stopifnot(all(pcs_use %in% colnames(scores)))
+  stopifnot(nrow(df) == nrow(scores))
+  stopifnot(region_col %in% names(df))
+
+  set.seed(seed)
+  km <- kmeans(
+    x = scores[, pcs_use, drop = FALSE],
+    centers = k,
+    nstart = nstart,
+    iter.max = max_iter
+  )
+
+  df2 <- df
+  df2$trait_cluster <- factor(paste0("Cluster_", km$cluster))
+
+  # compute HTA (if it errors, return NA + message)
+  res <- tryCatch(
+    compute_ht(df2, region_col = region_col, trait_col = "trait_cluster"),
+    error = function(e) list(HTA = NA_real_, local_hti = NA, .err = e$message)
+  )
+
+  list(
+    HTA = res$HTA,
+    local_hti = res$local_hti,
+    iter = km$iter,
+    tot_withinss = km$tot.withinss,
+    size = km$size,
+    err_msg = res$.err
+  )
+}
+
+# 2) sweep k for a fixed PC set
+sweep_k_ht <- function(df, scores, pcs_use, k_values,
+                       region_col = "region_2x2",
+                       nstart = 100, max_iter = 1000, seed = 1) {
+  out <- lapply(k_values, function(k) {
+    r <- run_kmeans_ht(
+      df = df, scores = scores, pcs_use = pcs_use, k = k,
+      region_col = region_col, nstart = nstart, max_iter = max_iter, seed = seed
+    )
+
+    data.frame(
+      pcs = paste(pcs_use, collapse = ","),
+      d = length(pcs_use),
+      k = k,
+      HTA = r$HTA,
+      err_msg = ifelse(is.null(r$err_msg), NA_character_, r$err_msg),
+      iter = r$iter,
+      tot_withinss = r$tot_withinss,
+      size_min = min(r$size),
+      size_max = max(r$size)
+    )
+  })
+  do.call(rbind, out)
+}
+
+# 3) sweep across PC sets + k
+sweep_pcsets_k_ht <- function(df, scores, pc_sets, k_values,
+                              region_col = "region_2x2",
+                              nstart = 100, max_iter = 1000, seed = 1) {
+  all_res <- do.call(rbind, lapply(names(pc_sets), function(set_name) {
+    pcs_use <- pc_sets[[set_name]]
+    tmp <- sweep_k_ht(
+      df = df, scores = scores, pcs_use = pcs_use, k_values = k_values,
+      region_col = region_col, nstart = nstart, max_iter = max_iter, seed = seed
+    )
+    tmp$pc_set <- set_name
+    tmp
+  }))
+  all_res <- all_res[, c("pc_set", setdiff(names(all_res), "pc_set"))]
+  all_res[order(all_res$pc_set, all_res$k), , drop = FALSE]
+}
+```
+
+
+# heterogeneous dataset clustering
+```{r}
+scores <- as.data.frame(pca_fit$x)
+
+# quick sanity checks
+stopifnot(nrow(health_data) == nrow(scores))
+stopifnot("region_2x2" %in% names(health_data))
+
+pc_sets <- list(
+  PC4 = paste0("PC", 1:4),
+  PC6 = paste0("PC", 1:6),
+  PC8 = paste0("PC", 1:8)
+)
+
+k_values <- 2:15   # or 6:12, etc.
+
+het_results <- sweep_pcsets_k_ht(
+  df = health_data,
+  scores = scores,
+  pc_sets = pc_sets,
+  k_values = k_values,
+  region_col = "region_2x2",
+  nstart = 100,
+  max_iter = 1000,
+  seed = 1
+)
+
+print(het_results)
+```
+
+
+```{r}
+# basic plot: HTA vs k, one line per pc_set
+ggplot(het_results, aes(x = k, y = HTA, group = pc_set)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ pc_set, scales = "free_y") +
+  labs(x = "k (number of clusters)", y = "HTA") +
+  theme_bw()
+
+ggplot(het_results, aes(x = k, y = HTA, color = pc_set, group = pc_set)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(x = "k (number of clusters)", y = "HTA", color = "PC set") +
+  theme_bw()
+```
+
+
+
+# homogeneous dataset clustering
+
+```{r}
+scores_homo <- as.data.frame(pca_fit_homo$x)
+
+# sanity checks
+stopifnot(nrow(health_homo) == nrow(scores_homo))
+stopifnot("region_2x2" %in% names(health_homo))
+
+# same pc sets + k sweep
+pc_sets <- list(
+  PC4 = paste0("PC", 1:4),
+  PC6 = paste0("PC", 1:6),
+  PC8 = paste0("PC", 1:8)
+)
+
+k_values <- 2:15  # keep same range for comparability
+
+homo_results <- sweep_pcsets_k_ht(
+  df = health_homo,
+  scores = scores_homo,
+  pc_sets = pc_sets,
+  k_values = k_values,
+  region_col = "region_2x2",
+  nstart = 100,
+  max_iter = 1000,
+  seed = 1
+)
+
+print(homo_results)
+```
+
+
+```{r}
+ggplot(homo_results, aes(x = k, y = HTA, color = pc_set, group = pc_set)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(x = "k (number of clusters)", y = "HTA", color = "PC set") +
+  theme_bw()
+```
+
+## check why homogenoeus dataset has a high HTA
+```{r}
+# pick the same settings you used for the plot
+pcs_use <- paste0("PC", 1:4)
+k <- 3
+
+scores_homo <- as.data.frame(pca_fit_homo$x)
+stopifnot(nrow(health_homo) == nrow(scores_homo))
+
+set.seed(1)
+km <- kmeans(
+  x = scores_homo[, pcs_use, drop = FALSE],
+  centers = k,
+  nstart = 100,
+  iter.max = 1000,
+  algorithm = "Lloyd"
+)
+
+df2 <- health_homo
+df2$trait_cluster <- factor(paste0("Cluster_", km$cluster))
+```
+
+
+```{r}
+tab <- with(df2, table(region_2x2, trait_cluster))
+prop <- prop.table(tab, margin = 1)   # within-region proportions
+
+# optional: look at a few regions
+prop[1:min(5, nrow(prop)), 1:min(10, ncol(prop))]
+
+# summarize how uniform the mix is per region
+apply(prop, 1, function(p) {
+  p <- p[p > 0]
+  c(entropy = -sum(p * log(p)) / log(length(levels(df2$trait_cluster))),
+    max_p = max(p),
+    min_p = min(p))
+})
+```
+
+```{r}
+sizes <- km$size
+sizes
+c(min = min(sizes), max = max(sizes), ratio = max(sizes)/min(sizes), sd = sd(sizes))
+```
+
+```{r}
+# install.packages("cluster")
+library(cluster)
+Z <- scores_homo[, paste0("PC", 1:4), drop=FALSE]
+mean(silhouette(km$cluster, dist(Z))[,3])
+```
+
+```{r}
+# make sure it's treated as a label
+df2$trait_combo <- as.character(df2$trait_cluster)
+
+# region x trait table
+tab  <- with(df2, table(region_2x2, trait_combo))
+prop <- prop.table(tab, 1)
+
+# for each region: max proportion and entropy
+max_prop <- apply(prop, 1, max)
+entropy  <- apply(prop, 1, function(p) {
+  p <- p[p > 0]
+  -sum(p * log(p))
+})
+
+data.frame(region = rownames(prop), max_prop = max_prop, entropy = entropy)
+
+# optional: see the full per-region proportions
+round(prop, 3)
+```
+
+
+
+# randomly assign patients into regions
+
+```{r}
+set.seed(123)
+
+health_data$region_2x2_rand <- sample(health_data$region_2x2)
+
+# keep the same level order for consistency
+health_data$region_2x2_rand <- factor(
+  health_data$region_2x2_rand,
+  levels = levels(health_data$region_2x2)
+)
+```
+
+
+```{r}
+set.seed(123)
+
+df2$region_2x2_rand <- sample(df2$region_2x2)
+
+# keep the same level order for consistency
+df2$region_2x2_rand <- factor(
+  df2$region_2x2_rand,
+  levels = levels(df2$region_2x2)
+)
+```
+
+
+```{r}
+scores_homo <- as.data.frame(pca_fit_homo$x)
+
+# sanity checks
+stopifnot(nrow(health_homo) == nrow(scores_homo))
+stopifnot("region_2x2_rand" %in% names(health_homo))
+
+# same pc sets + k sweep
+pc_sets <- list(
+  PC4 = paste0("PC", 1:4),
+  PC6 = paste0("PC", 1:6),
+  PC8 = paste0("PC", 1:8)
+)
+
+k_values <- 2:15  # keep same range for comparability
+
+homo_results <- sweep_pcsets_k_ht(
+  df = health_homo,
+  scores = scores_homo,
+  pc_sets = pc_sets,
+  k_values = k_values,
+  region_col = "region_2x2_rand",
+  nstart = 100,
+  max_iter = 1000,
+  seed = 1
+)
+
+print(homo_results)
+```
+
+```{r}
+set.seed(1)
+B <- 500
+
+# observed (real regions)
+obs <- compute_ht(
+  df = df2,
+  region_col = "region_2x2",
+  trait_col  = "trait_cluster"
+)
+hta_obs <- obs$HTA
+
+# null: permute region labels (keeps region sizes identical)
+hta_null <- replicate(B, {
+  df_tmp <- df2
+  df_tmp$region_perm <- sample(df_tmp$region_2x2)
+  compute_ht(
+    df = df_tmp,
+    region_col = "region_perm",
+    trait_col  = "trait_cluster"
+  )$HTA
+})
+
+mean_null <- mean(hta_null)
+sd_null   <- sd(hta_null)
+z         <- (hta_obs - mean_null) / sd_null
+p_right   <- mean(hta_null >= hta_obs)                 # one-sided (high HTA)
+p_two     <- 2 * min(mean(hta_null >= hta_obs), mean(hta_null <= hta_obs))
+
+list(
+  hta_obs   = hta_obs,
+  mean_null = mean_null,
+  sd_null   = sd_null,
+  z         = z,
+  p_right   = p_right,
+  p_two     = p_two
+)
+```
+

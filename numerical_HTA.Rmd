@@ -1,0 +1,823 @@
+---
+title: "numerical_HTA"
+author: "Lu Huang"
+date: "2025-11-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+```
+
+
+```{r}
+AD_data <- read.csv("/Users/evelynhuang/Desktop/STA497/alzheimers_disease_data.csv", header = TRUE)
+
+head(AD_data)
+```
+
+```{r}
+min(AD_data$Age)
+max(AD_data$Age)
+```
+
+
+
+# HTI
+```{r}
+# discretize age into 3 bins
+AD_data$age_group <- cut(AD_data$Age,
+                    breaks = c(60, 70, 80, 90),
+                    labels = c("1", "2", "3"),
+                    include.lowest = TRUE)
+
+# calculate HTI for age_group
+p <- prop.table(table(AD_data$age_group))
+C <- length(p)
+HTI_age <- -sum(p * log(p)) / log(C)
+
+HTI_age
+```
+
+
+```{r}
+min(AD_data$BMI)
+max(AD_data$BMI)
+```
+
+
+```{r}
+AD_data$bmi_group <- cut(AD_data$BMI,
+                    breaks = c(0, 18.5, 25, 30, 100),
+                    labels = c("under", "normal", "over", "obese"),
+                    include.lowest = TRUE)
+
+p <- prop.table(table(AD_data$bmi_group))
+C <- length(p)
+HTI_bmi <- -sum(p * log(p)) / log(C)
+
+HTI_bmi
+```
+
+
+# HTA
+
+```{r}
+  # if (perm_B > 0) {
+  # 
+  #   set.seed(seed)
+  #   sp_idx_all <- split(seq_along(traits), cells)
+  #   sp_idx      <- sp_idx_all[names(by_cell)]
+  #   idx_kept    <- unlist(sp_idx, use.names = FALSE)
+  #   traits_kept <- traits[idx_kept]
+  #   w_perm <- vapply(sp_idx, length, integer(1))
+  #   ends   <- cumsum(w_perm)
+  #   starts <- c(1, head(ends, -1) + 1)
+  #   hta_perm <- numeric(perm_B)
+  #   for (b in seq_len(perm_B)) {
+  #     perm <- sample(traits_kept)
+  #     local_perm <- mapply(function(s, e) hti(perm[s:e]), starts, ends)
+  #     hta_perm[b] <- sum(w_perm * local_perm) / sum(w_perm)
+  #   }
+  #   p_hi  <- mean(hta_perm >= HTA)
+  #   p_lo  <- mean(hta_perm <= HTA)
+  #   p_two <- min(1, 2 * min(p_hi, p_lo))
+  #   res$perm <- list(B = perm_B, null = hta_perm,
+  #                    p_hi = p_hi, p_lo = p_lo, p_two = p_two)
+  # 
+  # }
+  # 
+  # return(res)
+```
+
+
+
+```{r}
+# ---- HTI / HTA utilities ----
+hti <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(0)
+  if (is.factor(x)) x <- droplevels(x)
+  tab <- table(x)
+  p <- as.numeric(tab) / sum(tab)
+  p <- p[p > 0]
+  C <- length(p)
+  if (C <= 1) return(0)
+  -sum(p * log(p)) / log(C)
+}
+
+qbreaks <- function(v, k) {
+  br <- unique(quantile(v, probs = seq(0, 1, length.out = k + 1), na.rm = TRUE))
+  if (length(br) < k + 1) br <- unique(pretty(v, n = k))
+  br
+}
+
+compute_hta <- function(df, age_k, bmi_k,
+                        trait_cols,
+                        min_cell_n = 5, perm_B = 0, seed = 1,
+                        p_method = c("hta_tail","cell_z"),
+                        debug = FALSE) {
+
+  p_method <- match.arg(p_method)
+
+  # Coerce traits to factors
+  for (nm in trait_cols) if (!is.factor(df[[nm]])) df[[nm]] <- factor(df[[nm]])
+
+  # Build Age/BMI bins
+  age_br <- qbreaks(df$Age, age_k)
+  bmi_br <- qbreaks(df$BMI, bmi_k)
+  df$AgeBin <- cut(df$Age, breaks = age_br, include.lowest = TRUE, right = TRUE)
+  df$BMIBin <- cut(df$BMI, breaks = bmi_br, include.lowest = TRUE, right = TRUE)
+  df$cell   <- interaction(df$AgeBin, df$BMIBin, drop = TRUE)
+
+  # Trait combos on complete rows only
+  complete_traits <- stats::complete.cases(df[, trait_cols])
+  traits_all <- interaction(df[, trait_cols], drop = TRUE)
+  traits     <- as.character(traits_all[complete_traits])
+  cells      <- droplevels(df$cell[complete_traits])
+
+  # Split by cell and enforce min size
+  by_cell <- split(traits, cells)
+  cell_n  <- sapply(by_cell, length)
+  keep    <- cell_n >= min_cell_n
+  by_cell <- by_cell[keep]
+  cell_n  <- cell_n[keep]
+  if (length(by_cell) == 0) {
+    stop("No cells left after filtering; use a coarser grid or lower min_cell_n.")
+  }
+
+  # Local HTIs and weights
+  local_hti <- sapply(by_cell, hti)
+  w <- cell_n
+  HTA <- sum(w * local_hti) / sum(w)
+
+  res <- list(
+    HTA        = HTA,
+    cells_used = length(by_cell),
+    total_n    = sum(w),
+    age_breaks = age_br,
+    bmi_breaks = bmi_br,
+    local_hti  = local_hti,
+    cell_n     = w,
+    cells_used_names = names(by_cell)
+  )
+
+  # ----- permutation section (kept-only pool) -----
+  if (perm_B > 0) {
+    set.seed(seed)
+
+    sp_idx_all <- split(seq_along(traits), cells)       # complete rows
+    sp_idx      <- sp_idx_all[names(by_cell)]           # kept cells only
+    idx_kept    <- unlist(sp_idx, use.names = FALSE)
+    traits_kept <- traits[idx_kept]
+
+    w_perm <- vapply(sp_idx, length, integer(1))
+    ends   <- cumsum(w_perm)
+    starts <- c(1, head(ends, -1) + 1)
+
+    if (p_method == "hta_tail") {
+      hta_perm <- numeric(perm_B)
+      for (b in seq_len(perm_B)) {
+        perm <- sample(traits_kept)
+        local_perm <- mapply(function(s,e) hti(perm[s:e]), starts, ends)
+        hta_perm[b] <- sum(w_perm * local_perm) / sum(w_perm)
+      }
+      p_one <- mean(hta_perm >= HTA)
+      res$perm <- list(B = perm_B, null_hta = hta_perm, p_one = p_one)
+
+    } else { # "cell_z"
+      H <- matrix(NA_real_, nrow = perm_B, ncol = length(w_perm))
+      for (b in seq_len(perm_B)) {
+        perm <- sample(traits_kept)
+        H[b, ] <- mapply(function(s,e) hti(perm[s:e]), starts, ends)
+      }
+      mu_r <- colMeans(H)
+      sd_r <- apply(H, 2, stats::sd)
+
+      keep_r <- which(sd_r > 0 & is.finite(sd_r))
+      if (length(keep_r) == 0L) {
+        # fallback: single-sided tail on HTA
+        hta_perm <- as.vector(H %*% w_perm) / sum(w_perm)   # weighted HTA per permutation
+        Z <- NA_real_
+        p_one <- mean(hta_perm >= HTA)
+      } else {
+        num <- sum(local_hti[keep_r] - mu_r[keep_r])
+        den <- sqrt(sum(sd_r[keep_r]^2))
+        Z <- num / den
+        p_one <- 1 - pnorm(Z)
+      }
+      res$perm <- list(B = perm_B, Z = Z, p_one = p_one,
+                       mu_r = mu_r, sd_r = sd_r, used_regions = keep_r)
+    }
+
+    # -------- diagnostics you asked for --------
+    if (debug) {
+      # quick 50-permutation check of per-cell sd
+      Bcheck <- min(50L, perm_B)
+      Hcheck <- matrix(NA_real_, nrow = Bcheck, ncol = length(w_perm))
+      for (b in seq_len(Bcheck)) {
+        perm <- sample(traits_kept)
+        Hcheck[b, ] <- mapply(function(s,e) hti(perm[s:e]), starts, ends)
+      }
+      res$diag <- list(
+        perm_B = perm_B,
+        n_unique_traits_kept = length(unique(traits_kept)),
+        w_perm = w_perm,
+        Hcheck_sd = apply(Hcheck, 2, sd)
+      )
+    }
+  }
+
+  res
+}
+```
+
+
+
+```{r}
+res_2x2 <- compute_hta(AD_data, age_k = 2, bmi_k = 2, perm_B=500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                      p_method="cell_z", debug=TRUE)
+
+res_3x3 <- compute_hta(AD_data, age_k = 3, bmi_k = 3, perm_B=500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                       p_method="cell_z", debug=TRUE)
+
+res_4x4 <- compute_hta(AD_data, age_k = 4, bmi_k = 4, perm_B=500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                       p_method="cell_z", debug=TRUE)
+
+list(`2x2`=list(HTA=res_2x2$HTA, p_val=res_2x2$perm$p_one),
+     `3x3`=list(HTA=res_3x3$HTA, p_val=res_3x3$perm$p_one),
+     `4x4`=list(HTA=res_4x4$HTA, p_val=res_4x4$perm$p_one))
+
+```
+
+```{r}
+# this doesn't work anymore since cell_z doesn't need null HTA.
+hist(is.numeric(res_4x4$perm$null_hta), breaks=40)
+abline(v=res_4x4$HTA, col="red", lwd=2)
+```
+
+
+```{r}
+out <- compute_hta(AD_data, age_k = 3, bmi_k = 3, perm_B = 500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                   p_method = "cell_z", debug = TRUE)
+
+out$perm$p_one                      # your single-sided p
+out$diag$perm_B                     # was permutation count > 0?
+out$diag$n_unique_traits_kept       # >= 2 required
+summary(out$diag$w_perm)            # cell sizes; should be >= 2, ideally >= 5
+summary(out$diag$Hcheck_sd)         # per-cell null sd; must have some > 0
+
+```
+
+```{r}
+out2 <- compute_hta(AD_data, age_k=3, bmi_k=3, perm_B=500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                    p_method="hta_tail", debug=TRUE)
+out2$perm$p_one  # Pr(HTA_perm >= HTA_obs)
+
+```
+
+```{r}
+# try to plot one side p value based on permutation test
+hist(out2$perm$null_hta, breaks=40, main="HTA from observed data", xlab="HTA under permutation")
+abline(v=out$HTA, lwd=2, col="red")         # observed HTA
+
+```
+
+```{r}
+res_5x5 <- compute_hta(AD_data, age_k = 5, bmi_k = 5, perm_B=500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                      p_method="cell_z", debug=TRUE)
+
+res_6x6 <- compute_hta(AD_data, age_k = 6, bmi_k = 6, perm_B=500, trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+                       p_method="cell_z", debug=TRUE)
+
+
+list(`5x5`=list(HTA=res_5x5$HTA, p_val=res_5x5$perm$p_one),
+     `6x6`=list(HTA=res_6x6$HTA, p_val=res_6x6$perm$p_one))
+```
+
+
+```{r}
+# k in {2,3,4,5,6}; HTA only
+ks <- 2:6
+hta_df <- do.call(rbind, lapply(ks, function(k) {
+  out <- compute_hta(AD_data, age_k = k, bmi_k = k, perm_B = 0)
+  data.frame(k = k, HTA = out$HTA, cells_used = out$cells_used, total_n = out$total_n)
+}))
+print(hta_df)
+
+plot(hta_df$k, hta_df$HTA, type = "b", xlab = "k (Age×BMI bins per axis)", ylab = "HTA")
+```
+
+# try a homogenous dataset
+```{r}
+psedo_data <- read.csv("/Users/evelynhuang/Desktop/STA497/psedo_homogeneous_dataset.csv", header = TRUE)
+
+head(psedo_data)
+```
+
+```{r}
+summary(psedo_data)
+```
+
+
+
+```{r}
+psedo_res_2x2 <- compute_hta(psedo_data, age_k = 2, bmi_k = 2, perm_B=500, trait_cols = c("SBP_grp", "LDL_grp"),
+                      p_method="cell_z", debug=TRUE)
+
+psedo_res_3x3 <- compute_hta(psedo_data, age_k = 3, bmi_k = 3, perm_B=500, trait_cols = c("SBP_grp", "LDL_grp"),
+                       p_method="cell_z", debug=TRUE)
+
+psedo_res_4x4 <- compute_hta(psedo_data, age_k = 4, bmi_k = 4, perm_B=500, trait_cols = c("SBP_grp", "LDL_grp"),
+                       p_method="cell_z", debug=TRUE)
+
+list(`2x2`=list(HTA=psedo_res_2x2$HTA, p_val=psedo_res_2x2$perm$p_one),
+     `3x3`=list(HTA=psedo_res_3x3$HTA, p_val=psedo_res_3x3$perm$p_one),
+     `4x4`=list(HTA=psedo_res_4x4$HTA, p_val=psedo_res_4x4$perm$p_one))
+```
+
+```{r}
+psedo_res_2x2 <- compute_hta(psedo_data, age_k = 2, bmi_k = 2, perm_B=500, trait_cols = c("SBP_grp", "LDL_grp"),
+                      p_method="hta_tail", debug=TRUE)
+
+psedo_res_3x3 <- compute_hta(psedo_data, age_k = 3, bmi_k = 3, perm_B=500, trait_cols = c("SBP_grp", "LDL_grp"),
+                       p_method="hta_tail", debug=TRUE)
+
+psedo_res_4x4 <- compute_hta(psedo_data, age_k = 4, bmi_k = 4, perm_B=500, trait_cols = c("SBP_grp", "LDL_grp"),
+                       p_method="hta_tail", debug=TRUE)
+
+list(`2x2`=list(HTA=psedo_res_2x2$HTA, p_val=psedo_res_2x2$perm$p_one),
+     `3x3`=list(HTA=psedo_res_3x3$HTA, p_val=psedo_res_3x3$perm$p_one),
+     `4x4`=list(HTA=psedo_res_4x4$HTA, p_val=psedo_res_4x4$perm$p_one))
+```
+
+# visualize traits within cells
+```{r}
+trait_cols <- c("Gender","Ethnicity","EducationLevel","Smoking")
+
+make_comp_df <- function(df, res, trait_cols, label) {
+  df2 <- df %>%
+    mutate(
+      AgeBin = cut(Age,
+                   breaks = res$age_breaks,
+                   include.lowest = TRUE,
+                   right = TRUE),
+      BMIBin = cut(BMI,
+                   breaks = res$bmi_breaks,
+                   include.lowest = TRUE,
+                   right = TRUE)
+    )
+
+  df2$trait <- interaction(df2[, trait_cols], drop = TRUE)
+
+  df2 %>%
+    filter(!is.na(AgeBin), !is.na(BMIBin), !is.na(trait)) %>%
+    group_by(AgeBin, BMIBin, trait) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(AgeBin, BMIBin) %>%
+    mutate(prop = n / sum(n)) %>%
+    ungroup() %>%
+    mutate(grid = label)
+}
+
+comp_2x2 <- make_comp_df(AD_data, res_2x2, trait_cols, "2x2")
+comp_3x3 <- make_comp_df(AD_data, res_3x3, trait_cols, "3x3")
+comp_4x4 <- make_comp_df(AD_data, res_4x4, trait_cols, "4x4")
+```
+
+
+## visualize heterogeneous datasets
+```{r}
+ggplot(comp_2x2, aes(x = "cell", y = prop, fill = trait)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  facet_grid(BMIBin ~ AgeBin) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Trait composition within each Age×BMI cell (2×2 grid)",
+    x = NULL, y = "Proportion within cell"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text.x = element_text(angle = 0)
+  )
+
+```
+
+
+```{r}
+cell_hti_2x2 <- data.frame(
+  cell      = res_2x2$cells_used_names,
+  local_hti = res_2x2$local_hti,
+  n         = res_2x2$cell_n
+) %>%
+  separate(cell, into = c("AgeBin", "BMIBin"), sep = "\\.", extra = "merge") %>%
+  mutate(local_hti = round(local_hti, 3))
+
+cell_hti_2x2
+
+```
+
+```{r}
+ggplot(comp_4x4, aes(x = "cell", y = prop, fill = trait)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  facet_grid(BMIBin ~ AgeBin) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Trait composition within each Age×BMI cell (4×4 grid)",
+    x = NULL, y = "Proportion within cell"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text.x = element_text(angle = 0)
+  )
+
+```
+
+
+
+```{r}
+cell_hti_4x4 <- data.frame(
+  cell      = res_4x4$cells_used_names,
+  local_hti = res_4x4$local_hti,
+  n         = res_4x4$cell_n
+) %>%
+  separate(cell, into = c("AgeBin", "BMIBin"), sep = "\\.", extra = "merge") %>%
+  mutate(local_hti = round(local_hti, 3))
+
+cell_hti_4x4
+```
+
+
+## visualize homogeneous datasets
+```{r}
+psedo_comp_2x2 <- make_comp_df(psedo_data, psedo_res_2x2, trait_cols = c("SBP_grp", "LDL_grp"), "2x2")
+ggplot(psedo_comp_2x2, aes(x = "cell", y = prop, fill = trait)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  facet_grid(BMIBin ~ AgeBin) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Trait composition within each Age×BMI cell with synthetic homogenous data",
+    x = NULL, y = "Proportion within cell"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+```
+
+# adapt tau square
+
+```{r}
+make_cells_quantile <- function(df, K) {
+  # Probabilities for K bins: 0, 1/K, 2/K, ..., 1
+  probs <- seq(0, 1, length.out = K + 1)
+  
+  # Age breaks by quantiles
+  age_breaks <- quantile(df$Age, probs = probs, na.rm = TRUE)
+  age_breaks <- unique(age_breaks)  # in case of ties
+  
+  # BMI breaks by quantiles
+  bmi_breaks <- quantile(df$BMI, probs = probs, na.rm = TRUE)
+  bmi_breaks <- unique(bmi_breaks)
+  
+  df %>%
+    mutate(
+      age_bin = cut(Age, breaks = age_breaks, include.lowest = TRUE),
+      bmi_bin = cut(BMI, breaks = bmi_breaks, include.lowest = TRUE),
+      cell_id = interaction(age_bin, bmi_bin, drop = TRUE)
+    )
+}
+```
+
+
+```{r}
+# 2x2 grid
+df_2 <- make_cells_quantile(AD_data, K = 2)
+
+# 3x3 grid
+df_3 <- make_cells_quantile(AD_data, K = 3)
+
+# 4x4 grid
+df_4 <- make_cells_quantile(AD_data, K = 4)
+```
+
+
+## categorical variable
+```{r}
+m_smoke_2 <- glmer(Smoking ~ 1 + (1 | cell_id),
+                 data = df_2,
+                 family = binomial)
+
+VarCorr(m_smoke_2)
+
+m_smoke_3 <- glmer(Smoking ~ 1 + (1 | cell_id),
+                 data = df_3,
+                 family = binomial)
+
+VarCorr(m_smoke_3)
+
+m_smoke_4 <- glmer(Smoking ~ 1 + (1 | cell_id),
+                 data = df_4,
+                 family = binomial)
+
+VarCorr(m_smoke_4)
+```
+
+
+```{r}
+m_gender_2 <- glmer(Gender ~ 1 + (1 | cell_id),
+                 data = df_2,
+                 family = binomial)
+
+VarCorr(m_gender_2)
+
+m_gender_3 <- glmer(Gender ~ 1 + (1 | cell_id),
+                 data = df_3,
+                 family = binomial)
+
+VarCorr(m_gender_3)
+
+m_gender_4 <- glmer(Gender ~ 1 + (1 | cell_id),
+                 data = df_4,
+                 family = binomial)
+
+VarCorr(m_gender_4)
+```
+
+```{r}
+df_3 <- df_3 %>%
+  mutate(
+    Ethnicity_num      = as.numeric(Ethnicity),
+    EducationLevel_num = as.numeric(EducationLevel),
+
+    Ethnicity_z        = as.numeric(scale(Ethnicity_num)),
+    EducationLevel_z   = as.numeric(scale(EducationLevel_num))
+  )
+
+# Ethnicity
+m_eth <- lmer(Ethnicity_z ~ 1 + (1 | cell_id),
+              data = df_3,
+              REML = TRUE)
+
+VarCorr(m_eth)
+
+# EducationLevel
+m_edu <- lmer(EducationLevel_z ~ 1 + (1 | cell_id),
+              data = df_3,
+              REML = TRUE)
+
+VarCorr(m_edu)
+
+# Ethnicity
+vc_eth   <- VarCorr(m_eth)
+tau2_eth <- as.numeric(vc_eth$cell_id)^2          # between-cell variance
+sigma2_eth <- attr(vc_eth, "sc")^2                # residual variance
+ICC_eth  <- tau2_eth / (tau2_eth + sigma2_eth)
+
+# Education
+vc_edu   <- VarCorr(m_edu)
+tau2_edu <- as.numeric(vc_edu$cell_id)^2
+sigma2_edu <- attr(vc_edu, "sc")^2
+ICC_edu  <- tau2_edu / (tau2_edu + sigma2_edu)
+
+tau2_eth; ICC_eth
+tau2_edu; ICC_edu
+```
+
+## numerical variable
+```{r}
+df_2 <- df_2 %>%
+  mutate(SleepQuality_z = as.numeric(scale(SleepQuality)))
+
+df_3 <- df_3 %>%
+  mutate(SleepQuality_z = as.numeric(scale(SleepQuality)))
+
+df_4 <- df_4 %>%
+  mutate(SleepQuality_z = as.numeric(scale(SleepQuality)))
+
+m_sp_2 <- glmer(SleepQuality ~ 1 + (1 | cell_id),
+                 data = df_2)
+
+VarCorr(m_sp_2)
+
+m_sp_3 <- glmer(SleepQuality ~ 1 + (1 | cell_id),
+                 data = df_3)
+
+VarCorr(m_sp_3)
+
+m_sp_4 <- glmer(SleepQuality ~ 1 + (1 | cell_id),
+                 data = df_4)
+
+VarCorr(m_sp_4)
+```
+
+## alpha simpson index
+
+```{r}
+# ---- Gini–Simpson (GS) utilities (no permutation) ----
+gs_local <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_real_)
+  if (is.factor(x)) x <- droplevels(x)
+  tab <- table(x)
+  p <- as.numeric(tab) / sum(tab)
+  if (length(p) <= 1) return(0)
+  1 - sum(p^2)
+}
+
+compute_gs <- function(df, age_k, bmi_k,
+                       trait_cols,
+                       min_cell_n = 5) {
+
+  # Coerce traits to factors
+  for (nm in trait_cols) if (!is.factor(df[[nm]])) df[[nm]] <- factor(df[[nm]])
+
+  # Build Age/BMI bins (same logic as compute_hta)
+  age_br <- qbreaks(df$Age, age_k)
+  bmi_br <- qbreaks(df$BMI, bmi_k)
+  df$AgeBin <- cut(df$Age, breaks = age_br, include.lowest = TRUE, right = TRUE)
+  df$BMIBin <- cut(df$BMI, breaks = bmi_br, include.lowest = TRUE, right = TRUE)
+  df$cell   <- interaction(df$AgeBin, df$BMIBin, drop = TRUE)
+
+  # Trait combos on complete rows only
+  complete_traits <- stats::complete.cases(df[, trait_cols])
+  traits_all <- interaction(df[, trait_cols], drop = TRUE)
+  traits <- as.character(traits_all[complete_traits])
+  cells  <- droplevels(df$cell[complete_traits])
+
+  # Split by cell and enforce min size
+  by_cell <- split(traits, cells)
+  cell_n  <- sapply(by_cell, length)
+  keep    <- cell_n >= min_cell_n
+  by_cell <- by_cell[keep]
+  cell_n  <- cell_n[keep]
+
+  if (length(by_cell) == 0) {
+    stop("No cells left after filtering; use a coarser grid or lower min_cell_n.")
+  }
+
+  # Local GS and HTA-style weighted average
+  local_gs <- sapply(by_cell, gs_local)
+  w <- cell_n
+  GS_HTA <- sum(w * local_gs) / sum(w)
+
+  list(
+    GS_HTA      = GS_HTA,
+    cells_used  = length(by_cell),
+    total_n     = sum(w),
+    age_breaks  = age_br,
+    bmi_breaks  = bmi_br,
+    local_gs    = local_gs,
+    cell_n      = w,
+    cells_used_names = names(by_cell)
+  )
+}
+
+```
+
+
+```{r}
+out_gs_3 <- compute_gs(
+  AD_data, age_k = 3, bmi_k = 3,
+  trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+  min_cell_n = 5
+)
+
+out_gs_3$GS_HTA
+
+
+out_gs_4 <- compute_gs(
+  AD_data, age_k = 4, bmi_k = 4,
+  trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+  min_cell_n = 5
+)
+
+out_gs_4$GS_HTA
+
+out_gs_5 <- compute_gs(
+  AD_data, age_k = 5, bmi_k = 5,
+  trait_cols = c("Gender","Ethnicity","EducationLevel","Smoking"),
+  min_cell_n = 5
+)
+
+out_gs_5$GS_HTA
+
+```
+
+
+```{r}
+gs_res_2x2 <- compute_gs(
+  psedo_data, age_k = 2, bmi_k = 2,
+  trait_cols = c("SBP_grp", "LDL_grp")
+)
+
+gs_res_3x3 <- compute_gs(
+  psedo_data, age_k = 3, bmi_k = 3,
+  trait_cols = c("SBP_grp", "LDL_grp")
+)
+
+gs_res_4x4 <- compute_gs(
+  psedo_data, age_k = 4, bmi_k = 4,
+  trait_cols = c("SBP_grp", "LDL_grp")
+)
+
+list(
+  `2x2` = list(GS = gs_res_2x2$GS_HTA, cells_used = gs_res_2x2$cells_used, total_n = gs_res_2x2$total_n),
+  `3x3` = list(GS = gs_res_3x3$GS_HTA, cells_used = gs_res_3x3$cells_used, total_n = gs_res_3x3$total_n),
+  `4x4` = list(GS = gs_res_4x4$GS_HTA, cells_used = gs_res_4x4$cells_used, total_n = gs_res_4x4$total_n)
+)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+plot_df <- data.frame(
+  grid = factor(c("2×2", "3×3", "4×4"), levels = c("2×2", "3×3", "4×4")),
+  HTA = c(0.8814784, 0.8952970, 0.9089375),
+  Alpha_Simpson = c(0.9586273, 0.9559831, 0.9506439)
+)
+
+plot_df_long <- plot_df %>%
+  pivot_longer(cols = c(HTA, Alpha_Simpson),
+               names_to = "Metric",
+               values_to = "Score")
+
+ggplot(plot_df_long, aes(x = grid, y = Score, group = Metric, shape = Metric)) +
+  geom_line(linewidth = 0.8, color = "black") +
+  geom_point(size = 3, color = "black") +
+  scale_y_continuous(limits = c(0.85, 1.00)) +
+  labs(
+    title = "Heterogeneous dataset",
+    x = "Age × BMI grid",
+    y = "Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+plot_df <- tibble::tribble(
+  ~dataset,         ~grid, ~HTA,       ~Alpha_Simpson,
+  "Heterogeneous",  "2×2", 0.8814784,  0.9586273,
+  "Heterogeneous",  "3×3", 0.8952970,  0.9559831,
+  "Heterogeneous",  "4×4", 0.9089375,  0.9506439,
+  "Homogeneous",    "2×2", 0.2804294,  0.2044485,
+  "Homogeneous",    "3×3", 0.4491998,  0.4357892,
+  "Homogeneous",    "4×4", 0.2918942,  0.2033292   # fill in the HTA value here
+)
+
+plot_df <- plot_df %>%
+  mutate(
+    grid = factor(grid, levels = c("2×2", "3×3", "4×4")),
+    dataset = factor(dataset, levels = c("Heterogeneous", "Homogeneous"))
+  )
+
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = c(HTA, Alpha_Simpson),
+    names_to = "Metric",
+    values_to = "Score"
+  )
+
+ggplot(plot_long, aes(x = grid, y = Score, group = Metric, shape = Metric)) +
+  geom_line(linewidth = 0.8, color = "black", na.rm = TRUE) +
+  geom_point(size = 3, color = "black", na.rm = TRUE) +
+  facet_wrap(~dataset, nrow = 1) +
+  labs(
+    x = "Age × BMI grid",
+    y = "Score"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold", size = 16),
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+```
+
