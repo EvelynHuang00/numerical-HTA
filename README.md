@@ -37,7 +37,9 @@ This branch is presented as a sensitivity analysis because the tertile construct
 │   └── 03_clustering_sensitivity.R
 ├── figures/
 ├── data/
-│   └── README.md
+│   └── dirty_v3_path.csv
+│   └── psedo_homogeneous_dataset.csv
+│   └── alzheimers_disease_data.csv
 ├── report/
 │   └── HTA_final_report.pdf
 └── archive/                 # local provenance; ignored by Git by default
