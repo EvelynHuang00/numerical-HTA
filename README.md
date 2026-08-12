@@ -35,7 +35,6 @@ This branch is presented as a sensitivity analysis because the tertile construct
 │   ├── 01_permutation_and_variance.R
 │   ├── 02_pca_alternative_traits.R
 │   └── 03_clustering_sensitivity.R
-├── figures/
 ├── data/
 │   └── dirty_v3_path.csv
 │   └── psedo_homogeneous_dataset.csv
