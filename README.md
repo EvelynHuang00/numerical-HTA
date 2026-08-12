@@ -53,6 +53,4 @@ source("analysis/01_categorical_hta.R")
 source("analysis/02_pca_tertile_sensitivity.R")
 ```
 
-The first script saves the report-aligned figures to `figures/`.
-
 See `STRUCTURE.md` for a detailed mapping from the original Rmd notebooks to the cleaned project structure and for notes on the few non-methodological fixes made during reorganization.
